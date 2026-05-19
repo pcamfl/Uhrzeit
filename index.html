@@ -1,741 +1,768 @@
-```react
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { createRoot } from 'react-dom/client';
-
-// --- GAME DATA & LOGIC ---
-
-const ONES = ['', 'eins', 'zwei', 'drei', 'vier', 'fünf', 'sechs', 'sieben', 'acht', 'neun', 'zehn', 'elf', 'zwölf', 'dreizehn', 'vierzehn', 'fünfzehn', 'sechzehn', 'siebzehn', 'achtzehn', 'neunzehn'];
-const TENS = ['', '', 'zwanzig', 'dreißig', 'vierzig', 'fünfzig'];
-
-const SUBJECTS = ['Deutsch', 'Englisch', 'Erdkunde', 'Geschichte', 'Informatik', 'Kunst', 'Mathe', 'Musik', 'Naturwissenschaften', 'Religion', 'Sport', 'Tanzen', 'Theater'];
-const SUBJECTS_EN = {
-  'Deutsch': 'German', 'Englisch': 'English', 'Erdkunde': 'Geography', 'Geschichte': 'History', 
-  'Informatik': 'ICT', 'Kunst': 'Art', 'Mathe': 'Maths', 'Musik': 'Music', 
-  'Naturwissenschaften': 'Science', 'Religion': 'RE', 'Sport': 'PE', 'Tanzen': 'Dance', 'Theater': 'Drama'
-};
-
-const DAYS = ['Montags', 'Dienstags', 'Mittwochs', 'Donnerstags', 'Freitags'];
-const DAYS_EN = {
-  'Montags': 'Mondays', 'Dienstags': 'Tuesdays', 'Mittwochs': 'Wednesdays', 
-  'Donnerstags': 'Thursdays', 'Freitags': 'Fridays'
-};
-
-function numToDe(n) {
-  if (n === 0) return 'null';
-  if (n < 20) return ONES[n];
-  const t = Math.floor(n / 10);
-  const o = n % 10;
-  if (o === 0) return TENS[t];
-  if (o === 1) return 'einund' + TENS[t];
-  return ONES[o] + 'und' + TENS[t];
-}
-
-function getFormalTime(h, m) {
-  const hStr = h === 1 ? 'ein' : numToDe(h);
-  if (m === 0) return `${hStr} Uhr`;
-  return `${hStr} Uhr ${numToDe(m)}`;
-}
-
-function getInformalTime(h, m) {
-  if (h === 12 && m === 0) return 'mittags';
-
-  const nextH = h === 12 ? 1 : h + 1;
-  const hStr = h === 1 ? 'eins' : numToDe(h);
-  const nextHStr = nextH === 1 ? 'eins' : numToDe(nextH);
-
-  if (m === 0) return `${h === 1 ? 'ein' : numToDe(h)} Uhr`;
-  if (m === 15) return `Viertel nach ${hStr}`;
-  if (m === 30) return `halb ${nextHStr}`;
-  if (m === 45) return `Viertel vor ${nextHStr}`;
-  
-  if (m === 5) return `fünf nach ${hStr}`;
-  if (m === 10) return `zehn nach ${hStr}`;
-  if (m === 20) return `zwanzig nach ${hStr}`;
-  if (m === 25) return `fünfundzwanzig nach ${hStr}`;
-  
-  if (m === 35) return `fünfundzwanzig vor ${nextHStr}`;
-  if (m === 40) return `zwanzig vor ${nextHStr}`;
-  if (m === 50) return `zehn vor ${nextHStr}`;
-  if (m === 55) return `fünf vor ${nextHStr}`;
-  
-  return m < 30 ? `${numToDe(m)} nach ${hStr}` : `${numToDe(60 - m)} vor ${nextHStr}`;
-}
-
-// --- AUDIO SYSTEM ---
-let audioCtx = null;
-
-function initAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
-  }
-}
-
-function playTone(freq, type, duration, vol = 0.1) {
-  if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = type;
-  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.start();
-  osc.stop(audioCtx.currentTime + duration);
-}
-
-const sfx = {
-  correct: () => {
-    playTone(523.25, 'sine', 0.1); 
-    setTimeout(() => playTone(659.25, 'sine', 0.1), 100); 
-    setTimeout(() => playTone(783.99, 'sine', 0.2), 200); 
-  },
-  wrong: () => {
-    playTone(150, 'sawtooth', 0.3, 0.2);
-    setTimeout(() => playTone(120, 'sawtooth', 0.3, 0.2), 150);
-  },
-  click: () => playTone(800, 'sine', 0.05, 0.05),
-  levelUp: () => {
-    [0, 100, 200, 300, 400].forEach((delay, i) => {
-      setTimeout(() => playTone(440 + (i * 110), 'square', 0.15, 0.05), delay);
-    });
-  },
-  victory: () => {
-    [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
-      setTimeout(() => playTone(freq, 'sine', 0.3, 0.1), i * 200);
-    });
-    setTimeout(() => playTone(1046.50, 'square', 0.6, 0.1), 800);
-  }
-};
-
-// --- COMPONENTS ---
-
-const AnalogueClock = ({ h, m }) => {
-  const hourDeg = (h % 12 + m / 60) * 30;
-  const minDeg = m * 6;
-
-  return (
-    <svg viewBox="0 0 100 100" className="w-48 h-48 drop-shadow-xl">
-      <circle cx="50" cy="50" r="48" fill="white" stroke="#3b82f6" strokeWidth="4" />
-      <circle cx="50" cy="50" r="3" fill="#1e3a8a" />
-      {[...Array(12)].map((_, i) => (
-        <line key={i} x1="50" y1="8" x2="50" y2="12" stroke="#9ca3af" strokeWidth="2" transform={`rotate(${i * 30} 50 50)`} />
-      ))}
-      <text x="50" y="22" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">12</text>
-      <text x="78" y="54" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">3</text>
-      <text x="50" y="86" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">6</text>
-      <text x="22" y="54" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">9</text>
-      
-      <line x1="50" y1="50" x2="50" y2="25" stroke="#1e3a8a" strokeWidth="4" strokeLinecap="round" transform={`rotate(${hourDeg} 50 50)`} />
-      <line x1="50" y1="50" x2="50" y2="15" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" transform={`rotate(${minDeg} 50 50)`} />
-    </svg>
-  );
-};
-
-// --- MAIN APP ---
-
-export default function App() {
-  const [gameState, setGameState] = useState('MENU'); // MENU, PLAY, GAMEOVER, VICTORY
-  const [level, setLevel] = useState(1);
-  const [xp, setXp] = useState(0);
-  const [score, setScore] = useState(0);
-  const [streak, setStreak] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(60);
-  
-  const [question, setQuestion] = useState(null);
-  
-  const [selectedWordIds, setSelectedWordIds] = useState([]);
-  const [receptiveSelection, setReceptiveSelection] = useState({ day: null, time: null, subject: null });
-  const [feedbackState, setFeedbackState] = useState(''); 
-
-  const timerRef = useRef(null);
-
-  const shuffleArray = (arr) => [...arr].sort(() => Math.random() - 0.5);
-
-  const generateQuestion = useCallback((currentLevel) => {
-    const h = Math.floor(Math.random() * 12) + 1;
-    // Emphasize worksheet minutes
-    const allowedMinutes = [0, 5, 10, 15, 20, 25, 35, 40, 50, 55];
-    const m = allowedMinutes[Math.floor(Math.random() * allowedMinutes.length)];
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>School Day Sprint - German Time Game</title>
     
-    const day = DAYS[Math.floor(Math.random() * DAYS.length)];
-    const subject = SUBJECTS[Math.floor(Math.random() * SUBJECTS.length)];
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    const formalTime = getFormalTime(h, m);
-    const informalTime = getInformalTime(h, m);
+    <!-- React & ReactDOM (Production versions for better performance) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     
-    let mode = '';
-    let validPhrases = [];
-    let context = '';
-    let targetPhraseForDisplay = '';
-    let receptiveOptions = null;
-    let isAnalogue = false;
-    let isDigital = false;
+    <!-- Babel standalone to compile JSX in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-blue-50">
+    <!-- This is where the React app will inject itself -->
+    <div id="root"></div>
 
-    if (currentLevel === 1) {
-      isAnalogue = Math.random() > 0.5;
-      isDigital = !isAnalogue;
-      mode = isAnalogue ? 'ANALOGUE_MIX' : 'DIGITAL_MIX';
-      validPhrases = [formalTime, informalTime];
-      targetPhraseForDisplay = formalTime; 
-    } 
-    else if (currentLevel === 2) {
-      isAnalogue = Math.random() > 0.5;
-      isDigital = !isAnalogue;
-      mode = isAnalogue ? 'ANALOGUE_MIX' : 'DIGITAL_MIX';
-      validPhrases = [formalTime, informalTime];
-      targetPhraseForDisplay = informalTime;
-    } 
-    else if (currentLevel === 3) {
-      mode = 'RECEPTIVE_SENTENCE';
-      
-      const timePhraseFormal = (h === 12 && m === 0) ? 'mittags' : `um ${formalTime}`;
-      const timePhraseInformal = (h === 12 && m === 0) ? 'mittags' : `um ${informalTime}`;
-      
-      const useFormal = Math.random() > 0.5;
-      targetPhraseForDisplay = `${day} habe ich ${useFormal ? timePhraseFormal : timePhraseInformal} ${subject}`;
-      
-      const timeStr = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-      
-      let falseDays = shuffleArray(DAYS).filter(d => d !== day).slice(0, 2);
-      let falseSubjects = shuffleArray(SUBJECTS).filter(s => s !== subject).slice(0, 2);
-      
-      let falseTimes = [];
-      while(falseTimes.length < 2) {
-        let fh = Math.floor(Math.random() * 12) + 1;
-        let fm = allowedMinutes[Math.floor(Math.random() * allowedMinutes.length)];
-        let fStr = `${fh.toString().padStart(2, '0')}:${fm.toString().padStart(2, '0')}`;
-        if (fStr !== timeStr && !falseTimes.includes(fStr)) falseTimes.push(fStr);
-      }
+    <!-- The game logic written in React/JSX -->
+    <script type="text/babel">
+        // Extract hooks from the globally available React object
+        const { useState, useEffect, useCallback, useRef } = React;
 
-      receptiveOptions = {
-        days: shuffleArray([{text: DAYS_EN[day], val: day}, ...falseDays.map(d => ({text: DAYS_EN[d], val: d}))]),
-        times: shuffleArray([{text: timeStr, val: timeStr}, ...falseTimes.map(t => ({text: t, val: t}))]),
-        subjects: shuffleArray([{text: SUBJECTS_EN[subject], val: subject}, ...falseSubjects.map(s => ({text: SUBJECTS_EN[s], val: s}))]),
-        correctAnswers: { day, time: timeStr, subject }
-      };
-      setReceptiveSelection({ day: null, time: null, subject: null });
-    }
-    else {
-      // Level 4 & 5: Productive Sentences
-      isAnalogue = Math.random() > 0.5;
-      isDigital = !isAnalogue;
-      mode = 'SENTENCE_MIXED';
-      const timePhraseFormal = (h === 12 && m === 0) ? 'mittags' : `um ${formalTime}`;
-      const timePhraseInformal = (h === 12 && m === 0) ? 'mittags' : `um ${informalTime}`;
-      
-      validPhrases = [
-        `${day} habe ich ${timePhraseFormal} ${subject}`,
-        `${day} habe ich ${timePhraseInformal} ${subject}`
-      ];
-      
-      context = `Build: "${DAYS_EN[day]} I have ${SUBJECTS_EN[subject]} at ${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}"`;
-      if(h===12 && m===0) context = `Build: "${DAYS_EN[day]} I have ${SUBJECTS_EN[subject]} at midday"`;
-    }
+        // --- GAME DATA & LOGIC ---
 
-    let finalWordBank = [];
-    if (mode !== 'RECEPTIVE_SENTENCE') {
-      let maxWordCounts = {};
-      
-      validPhrases.forEach(phrase => {
-          let counts = {};
-          phrase.split(' ').forEach(w => { counts[w] = (counts[w] || 0) + 1; });
-          for (let w in counts) {
-              if (!maxWordCounts[w] || counts[w] > maxWordCounts[w]) {
-                  maxWordCounts[w] = counts[w];
-              }
-          }
-      });
-      
-      let baseWords = [];
-      for (let w in maxWordCounts) {
-          for (let i = 0; i < maxWordCounts[w]; i++) { baseWords.push(w); }
-      }
+        const ONES = ['', 'eins', 'zwei', 'drei', 'vier', 'fünf', 'sechs', 'sieben', 'acht', 'neun', 'zehn', 'elf', 'zwölf', 'dreizehn', 'vierzehn', 'fünfzehn', 'sechzehn', 'siebzehn', 'achtzehn', 'neunzehn'];
+        const TENS = ['', '', 'zwanzig', 'dreißig', 'vierzig', 'fünfzig'];
 
-      const distractors = ['und', 'vor', 'nach', 'halb', 'Viertel', 'Uhr', 'zehn', 'zwanzig', 'fünf', 'um', 'habe', 'ich'];
-      distractors.push(SUBJECTS.find(s => s !== subject));
-      distractors.push(DAYS.find(d => d !== day));
+        const SUBJECTS = ['Deutsch', 'Englisch', 'Erdkunde', 'Geschichte', 'Informatik', 'Kunst', 'Mathe', 'Musik', 'Naturwissenschaften', 'Religion', 'Sport', 'Tanzen', 'Theater'];
+        const SUBJECTS_EN = {
+          'Deutsch': 'German', 'Englisch': 'English', 'Erdkunde': 'Geography', 'Geschichte': 'History', 
+          'Informatik': 'ICT', 'Kunst': 'Art', 'Mathe': 'Maths', 'Musik': 'Music', 
+          'Naturwissenschaften': 'Science', 'Religion': 'RE', 'Sport': 'PE', 'Tanzen': 'Dance', 'Theater': 'Drama'
+        };
 
-      const targetLength = Math.max(8, baseWords.length + 3);
-      let loopProtection = 0; 
+        const DAYS = ['Montags', 'Dienstags', 'Mittwochs', 'Donnerstags', 'Freitags'];
+        const DAYS_EN = {
+          'Montags': 'Mondays', 'Dienstags': 'Tuesdays', 'Mittwochs': 'Wednesdays', 
+          'Donnerstags': 'Thursdays', 'Freitags': 'Fridays'
+        };
 
-      while(baseWords.length < targetLength && loopProtection < 100) {
-          const d = distractors[Math.floor(Math.random() * distractors.length)];
-          if (!baseWords.includes(d) || d === 'fünf') {
-            baseWords.push(d); 
-          }
-          loopProtection++;
-      }
-      
-      finalWordBank = shuffleArray(baseWords).map((word, id) => ({ id: `w_${id}`, word }));
-    }
-
-    setQuestion({
-      h, m, mode, validPhrases, wordBank: finalWordBank, context, targetPhraseForDisplay, receptiveOptions,
-      isAnalogue, isDigital
-    });
-    setSelectedWordIds([]);
-  }, []);
-
-  const startGame = () => {
-    initAudio(); 
-    setGameState('PLAY');
-    setLevel(1);
-    setXp(0);
-    setScore(0);
-    setStreak(0);
-    setTimeLeft(60);
-    generateQuestion(1);
-  };
-
-  const endGame = useCallback(() => {
-    setGameState('GAMEOVER');
-    clearInterval(timerRef.current);
-  }, []);
-
-  const triggerVictory = useCallback(() => {
-    sfx.victory();
-    setGameState('VICTORY');
-    clearInterval(timerRef.current);
-  }, []);
-
-  useEffect(() => {
-    if (gameState === 'PLAY') {
-      timerRef.current = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            endGame();
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(timerRef.current);
-  }, [gameState, endGame]);
-
-  const handleBankClick = (id) => {
-    if (feedbackState || selectedWordIds.includes(id)) return;
-    sfx.click();
-    
-    const newSelected = [...selectedWordIds, id];
-    setSelectedWordIds(newSelected);
-
-    const attemptStr = newSelected.map(selId => question.wordBank.find(w => w.id === selId).word).join(' ');
-    
-    if (question.validPhrases.includes(attemptStr)) {
-      checkProductiveAnswer(newSelected);
-    } else {
-      const maxWords = Math.max(...question.validPhrases.map(p => p.split(' ').length));
-      if (newSelected.length >= maxWords) {
-        checkProductiveAnswer(newSelected);
-      }
-    }
-  };
-
-  const handleAnswerClick = (id) => {
-    if (feedbackState) return;
-    sfx.click();
-    setSelectedWordIds(prev => prev.filter(selectedId => selectedId !== id));
-  };
-
-  const checkProductiveAnswer = (currentSelectionIds) => {
-    const attemptStr = currentSelectionIds.map(id => question.wordBank.find(w => w.id === id).word).join(' ');
-    const isCorrect = question.validPhrases.includes(attemptStr);
-    processAnswerResult(isCorrect);
-  };
-
-  const handleReceptiveClick = (category, value) => {
-    if (feedbackState) return;
-    sfx.click();
-    
-    const newSelection = { ...receptiveSelection, [category]: value };
-    setReceptiveSelection(newSelection);
-
-    if (newSelection.day && newSelection.time && newSelection.subject) {
-      const isCorrect = 
-        newSelection.day === question.receptiveOptions.correctAnswers.day &&
-        newSelection.time === question.receptiveOptions.correctAnswers.time &&
-        newSelection.subject === question.receptiveOptions.correctAnswers.subject;
-      
-      processAnswerResult(isCorrect);
-    }
-  };
-
-  const processAnswerResult = (isCorrect) => {
-    if (isCorrect) {
-      sfx.correct();
-      setFeedbackState('correct');
-      
-      // More generous time bonuses from Level 4
-      let timeBonus = 3;
-      if (level === 2) timeBonus = 4;
-      if (level === 3) timeBonus = 8;
-      if (level === 4) timeBonus = 15;
-      if (level === 5) timeBonus = 18;
-      
-      timeBonus += Math.floor(streak / 2); 
-      
-      // Increased max time to 120s so they can keep the huge bonuses
-      setTimeLeft(prev => Math.min(120, prev + timeBonus));
-      setStreak(prev => prev + 1);
-      
-      const points = 10 * (level) + (streak * 5);
-      setScore(prev => prev + points);
-      
-      const newXp = xp + 20;
-      setXp(newXp);
-      
-      let nextLevel = level;
-      if (newXp >= 60 && level === 1) nextLevel = 2;   // 3 correct
-      if (newXp >= 120 && level === 2) nextLevel = 3;  // 6 correct
-      if (newXp >= 180 && level === 3) nextLevel = 4;  // 9 correct
-      if (newXp >= 240 && level === 4) nextLevel = 5;  // 12 correct
-      if (newXp >= 300 && level === 5) {               // 15 correct -> WIN!
-        setTimeout(() => triggerVictory(), 800);
-        return;
-      }
-
-      if (nextLevel > level) {
-        sfx.levelUp();
-        setLevel(nextLevel);
-      }
-
-      setTimeout(() => {
-        setFeedbackState('');
-        generateQuestion(nextLevel);
-      }, 1000);
-
-    } else {
-      sfx.wrong();
-      setFeedbackState('wrong');
-      setStreak(0);
-      setTimeLeft(prev => Math.max(0, prev - 5));
-
-      setTimeout(() => {
-        setFeedbackState('');
-        if (question.mode === 'RECEPTIVE_SENTENCE') {
-           setReceptiveSelection({ day: null, time: null, subject: null });
-        } else {
-           setSelectedWordIds([]);
+        function numToDe(n) {
+          if (n === 0) return 'null';
+          if (n < 20) return ONES[n];
+          const t = Math.floor(n / 10);
+          const o = n % 10;
+          if (o === 0) return TENS[t];
+          if (o === 1) return 'einund' + TENS[t];
+          return ONES[o] + 'und' + TENS[t];
         }
-      }, 1000);
-    }
-  };
 
-  // --- RENDERERS ---
+        function getFormalTime(h, m) {
+          const hStr = h === 1 ? 'ein' : numToDe(h);
+          if (m === 0) return `${hStr} Uhr`;
+          return `${hStr} Uhr ${numToDe(m)}`;
+        }
 
-  if (gameState === 'MENU') {
-    return (
-      <div className="min-h-screen bg-blue-50 flex flex-col items-center justify-center p-4 font-sans text-gray-800">
-        <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-4 border-blue-400">
-          <h1 className="text-4xl font-extrabold text-blue-600 mb-2 tracking-tight">School Day Sprint ⏰</h1>
-          <p className="text-gray-600 mb-8 font-medium">Master telling the time in German!</p>
+        function getInformalTime(h, m) {
+          if (h === 12 && m === 0) return 'mittags';
+
+          const nextH = h === 12 ? 1 : h + 1;
+          const hStr = h === 1 ? 'eins' : numToDe(h);
+          const nextHStr = nextH === 1 ? 'eins' : numToDe(nextH);
+
+          if (m === 0) return `${h === 1 ? 'ein' : numToDe(h)} Uhr`;
+          if (m === 15) return `Viertel nach ${hStr}`;
+          if (m === 30) return `halb ${nextHStr}`;
+          if (m === 45) return `Viertel vor ${nextHStr}`;
           
-          <div className="space-y-4 text-left bg-blue-50 p-4 rounded-xl mb-8">
-            <h3 className="font-bold text-blue-800">How to play:</h3>
-            <ul className="text-sm text-blue-900 space-y-2 list-disc pl-4">
-              <li>Both formal ("neun Uhr zwanzig") and informal ("zwanzig nach neun") answers are accepted!</li>
-              <li>Words stay in place so you won't misclick!</li>
-              <li>Beat the clock! Build streaks for big time bonuses.</li>
-              <li>Complete all 5 Levels to win!</li>
-            </ul>
-          </div>
-
-          <button 
-            onClick={startGame}
-            className="w-full bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#1d4ed8] active:shadow-[0_0px_0_#1d4ed8] active:translate-y-[6px] transition-all text-xl animate-pulse"
-          >
-            Start Playing! ▶️
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (gameState === 'GAMEOVER') {
-    return (
-      <div className="min-h-screen bg-red-50 flex flex-col items-center justify-center p-4 font-sans">
-        <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-4 border-red-400 animate-bounce-short">
-          <h1 className="text-4xl font-extrabold text-red-500 mb-4">Time's Up!</h1>
-          <div className="text-6xl mb-6">🔔</div>
-          <div className="bg-gray-100 rounded-xl p-4 mb-8">
-            <p className="text-gray-500 font-bold uppercase tracking-wider text-sm">Final Score</p>
-            <p className="text-5xl font-black text-gray-800 my-2">{score}</p>
-            <p className="text-blue-500 font-bold">Level Reached: {level}</p>
-          </div>
-          <button 
-            onClick={startGame}
-            className="w-full bg-green-500 hover:bg-green-600 active:bg-green-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#15803d] active:shadow-[0_0px_0_#15803d] active:translate-y-[6px] transition-all text-xl"
-          >
-            Play Again 🔄
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (gameState === 'VICTORY') {
-    return (
-      <div className="min-h-screen bg-yellow-300 flex flex-col items-center justify-center p-4 font-sans overflow-hidden relative">
-        {/* Animated Background Confetti Elements */}
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          {[...Array(20)].map((_, i) => (
-             <div key={i} className={`absolute animate-fall-confetti`} 
-                  style={{ 
-                    left: `${Math.random() * 100}%`, 
-                    top: `-10%`,
-                    backgroundColor: ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'][Math.floor(Math.random()*5)],
-                    width: `${Math.random() * 10 + 5}px`,
-                    height: `${Math.random() * 20 + 10}px`,
-                    animationDelay: `${Math.random() * 3}s`,
-                    animationDuration: `${Math.random() * 2 + 3}s`,
-                    transform: `rotate(${Math.random() * 360}deg)`
-                  }} 
-              />
-          ))}
-        </div>
-
-        <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-8 border-yellow-500 animate-pop-in z-10 relative">
-          <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500 mb-6 drop-shadow-sm">
-            Gut gemacht!
-          </h1>
+          if (m === 5) return `fünf nach ${hStr}`;
+          if (m === 10) return `zehn nach ${hStr}`;
+          if (m === 20) return `zwanzig nach ${hStr}`;
+          if (m === 25) return `fünfundzwanzig nach ${hStr}`;
           
-          <div className="text-8xl mb-6 animate-bounce">🏆</div>
+          if (m === 35) return `fünfundzwanzig vor ${nextHStr}`;
+          if (m === 40) return `zwanzig vor ${nextHStr}`;
+          if (m === 50) return `zehn vor ${nextHStr}`;
+          if (m === 55) return `fünf vor ${nextHStr}`;
           
-          <div className="bg-yellow-50 rounded-2xl p-6 mb-8 border-2 border-yellow-200 shadow-inner">
-            <p className="text-lg text-gray-800 font-bold mb-2">You completed all levels!</p>
-            <p className="text-3xl font-black text-yellow-600 my-4">{score} pts</p>
-            <p className="text-md text-red-600 font-extrabold uppercase tracking-wide bg-yellow-100 p-3 rounded-lg border border-yellow-300">
-              Show this screen to Mr Croft-Cafferty for reward points!
-            </p>
-          </div>
+          return m < 30 ? `${numToDe(m)} nach ${hStr}` : `${numToDe(60 - m)} vor ${nextHStr}`;
+        }
 
-          <button 
-            onClick={startGame}
-            className="w-full bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#1d4ed8] active:shadow-[0_0px_0_#1d4ed8] active:translate-y-[6px] transition-all text-xl"
-          >
-            Play Again 🔄
-          </button>
-        </div>
+        // --- AUDIO SYSTEM ---
+        let audioCtx = null;
 
-        <style dangerouslySetInnerHTML={{__html:`
-          @keyframes fall-confetti {
-            0% { transform: translateY(-10vh) rotate(0deg); opacity: 1; }
-            100% { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+        function initAudio() {
+          if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           }
-          .animate-fall-confetti {
-            animation-name: fall-confetti;
-            animation-timing-function: linear;
-            animation-iteration-count: infinite;
+          if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
           }
-        `}} />
-      </div>
-    );
-  }
+        }
 
-  // PLAY STATE
-  return (
-    <div className={`min-h-screen flex flex-col p-4 font-sans transition-colors duration-300 ${
-      feedbackState === 'wrong' ? 'bg-red-100' : feedbackState === 'correct' ? 'bg-green-100' : 'bg-indigo-50'
-    }`}>
-      
-      {/* Top HUD */}
-      <div className="max-w-2xl w-full mx-auto bg-white rounded-2xl shadow-md p-4 mb-4 flex justify-between items-center border-b-4 border-indigo-200">
-        <div className="flex flex-col">
-          <span className="text-xs text-gray-500 font-bold uppercase">Level {level}/5</span>
-          <span className="text-2xl font-black text-indigo-600">{score} pt</span>
-        </div>
-        
-        {streak > 1 && (
-          <div className="flex items-center space-x-1 animate-pulse">
-            <span className="text-orange-500 text-xl font-black">{streak}x</span>
-            <span className="text-orange-500 text-sm font-bold">Combo! 🔥</span>
-          </div>
-        )}
+        function playTone(freq, type, duration, vol = 0.1) {
+          if (!audioCtx) return;
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+          gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start();
+          osc.stop(audioCtx.currentTime + duration);
+        }
 
-        <div className="flex flex-col items-end">
-          <span className="text-xs text-gray-500 font-bold uppercase">Time</span>
-          <span className={`text-2xl font-black ${timeLeft <= 10 ? 'text-red-500 animate-pulse' : 'text-gray-800'}`}>
-            {timeLeft}s
-          </span>
-        </div>
-      </div>
+        const sfx = {
+          correct: () => {
+            playTone(523.25, 'sine', 0.1); 
+            setTimeout(() => playTone(659.25, 'sine', 0.1), 100); 
+            setTimeout(() => playTone(783.99, 'sine', 0.2), 200); 
+          },
+          wrong: () => {
+            playTone(150, 'sawtooth', 0.3, 0.2);
+            setTimeout(() => playTone(120, 'sawtooth', 0.3, 0.2), 150);
+          },
+          click: () => playTone(800, 'sine', 0.05, 0.05),
+          levelUp: () => {
+            [0, 100, 200, 300, 400].forEach((delay, i) => {
+              setTimeout(() => playTone(440 + (i * 110), 'square', 0.15, 0.05), delay);
+            });
+          },
+          victory: () => {
+            [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+              setTimeout(() => playTone(freq, 'sine', 0.3, 0.1), i * 200);
+            });
+            setTimeout(() => playTone(1046.50, 'square', 0.6, 0.1), 800);
+          }
+        };
 
-      {/* Timer Bar */}
-      <div className="max-w-2xl w-full mx-auto h-3 bg-gray-200 rounded-full mb-6 overflow-hidden">
-        <div 
-          className={`h-full transition-all duration-1000 linear ${timeLeft > 20 ? 'bg-green-400' : timeLeft > 10 ? 'bg-yellow-400' : 'bg-red-500'}`}
-          style={{ width: `${Math.min(100, (timeLeft / 60) * 100)}%` }}
-        />
-      </div>
+        // --- COMPONENTS ---
 
-      {/* Main Game Area */}
-      <div className={`flex-grow max-w-2xl w-full mx-auto flex flex-col transition-transform ${feedbackState === 'wrong' ? 'animate-shake' : ''}`}>
-        
-        {/* RECEPTIVE LEVEL (Level 3) */}
-        {question?.mode === 'RECEPTIVE_SENTENCE' ? (
-          <div className="flex-grow flex flex-col gap-4">
-            <div className="bg-white rounded-3xl shadow-lg p-6 flex flex-col items-center justify-center border-4 border-indigo-100">
-               <h2 className="text-indigo-400 font-bold text-sm uppercase tracking-wider mb-2">Read and Match</h2>
-               <p className="text-2xl md:text-3xl font-bold text-gray-800 text-center">
-                 "{question.targetPhraseForDisplay}"
-               </p>
-            </div>
-            
-            <div className="bg-white rounded-3xl shadow-lg p-4 border-4 border-indigo-100 flex-grow flex flex-col justify-around gap-4">
-               {/* Days Row */}
-               <div className="flex flex-col">
-                 <span className="text-xs text-gray-400 font-bold uppercase mb-2">1. Select Day</span>
-                 <div className="flex gap-2">
-                   {question.receptiveOptions.days.map(opt => (
-                     <button key={opt.val} onClick={() => handleReceptiveClick('day', opt.val)}
-                       className={`flex-1 py-3 px-2 rounded-xl font-bold transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
-                         ${receptiveSelection.day === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
-                       {opt.text}
-                     </button>
-                   ))}
-                 </div>
-               </div>
-               
-               {/* Times Row */}
-               <div className="flex flex-col">
-                 <span className="text-xs text-gray-400 font-bold uppercase mb-2">2. Select Time</span>
-                 <div className="flex gap-2">
-                   {question.receptiveOptions.times.map(opt => (
-                     <button key={opt.val} onClick={() => handleReceptiveClick('time', opt.val)}
-                       className={`flex-1 py-3 px-2 rounded-xl font-bold font-mono text-lg transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
-                         ${receptiveSelection.time === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
-                       {opt.text}
-                     </button>
-                   ))}
-                 </div>
-               </div>
+        const AnalogueClock = ({ h, m }) => {
+          const hourDeg = (h % 12 + m / 60) * 30;
+          const minDeg = m * 6;
 
-               {/* Subjects Row */}
-               <div className="flex flex-col">
-                 <span className="text-xs text-gray-400 font-bold uppercase mb-2">3. Select Subject</span>
-                 <div className="flex gap-2">
-                   {question.receptiveOptions.subjects.map(opt => (
-                     <button key={opt.val} onClick={() => handleReceptiveClick('subject', opt.val)}
-                       className={`flex-1 py-3 px-2 rounded-xl font-bold transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
-                         ${receptiveSelection.subject === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
-                       {opt.text}
-                     </button>
-                   ))}
-                 </div>
-               </div>
-            </div>
-          </div>
-        ) : 
-        
-        /* PRODUCTIVE LEVELS (L1, L2, L4, L5) */
-        (
-          <>
-            {/* Question Display */}
-            <div className="bg-white rounded-3xl shadow-lg p-6 mb-4 flex-grow flex flex-col items-center justify-center border-4 border-indigo-100 min-h-[300px]">
+          return (
+            <svg viewBox="0 0 100 100" className="w-48 h-48 drop-shadow-xl">
+              <circle cx="50" cy="50" r="48" fill="white" stroke="#3b82f6" strokeWidth="4" />
+              <circle cx="50" cy="50" r="3" fill="#1e3a8a" />
+              {[...Array(12)].map((_, i) => (
+                <line key={i} x1="50" y1="8" x2="50" y2="12" stroke="#9ca3af" strokeWidth="2" transform={`rotate(${i * 30} 50 50)`} />
+              ))}
+              <text x="50" y="22" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">12</text>
+              <text x="78" y="54" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">3</text>
+              <text x="50" y="86" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">6</text>
+              <text x="22" y="54" textAnchor="middle" fontSize="12" fill="#4b5563" fontWeight="bold">9</text>
               
-              <h2 className="text-gray-400 font-bold text-sm uppercase tracking-wider mb-4 text-center">
-                {level < 3 ? 'Build the time in German' : 'Build the German sentence'}
-              </h2>
+              <line x1="50" y1="50" x2="50" y2="25" stroke="#1e3a8a" strokeWidth="4" strokeLinecap="round" transform={`rotate(${hourDeg} 50 50)`} />
+              <line x1="50" y1="50" x2="50" y2="15" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" transform={`rotate(${minDeg} 50 50)`} />
+            </svg>
+          );
+        };
 
-              <div className="mb-6 flex flex-col items-center justify-center">
-                {question?.isAnalogue ? (
-                  <AnalogueClock h={question.h} m={question.m} />
-                ) : question?.isDigital ? (
-                  <div className="bg-gray-800 text-green-400 font-mono text-7xl py-4 px-8 rounded-xl shadow-inner border-4 border-gray-900 tracking-widest">
-                    {question.h.toString().padStart(2, '0')}:{question.m.toString().padStart(2, '0')}
+        // --- MAIN APP ---
+
+        function App() {
+          const [gameState, setGameState] = useState('MENU'); // MENU, PLAY, GAMEOVER, VICTORY
+          const [level, setLevel] = useState(1);
+          const [xp, setXp] = useState(0);
+          const [score, setScore] = useState(0);
+          const [streak, setStreak] = useState(0);
+          const [timeLeft, setTimeLeft] = useState(60);
+          
+          const [question, setQuestion] = useState(null);
+          
+          const [selectedWordIds, setSelectedWordIds] = useState([]);
+          const [receptiveSelection, setReceptiveSelection] = useState({ day: null, time: null, subject: null });
+          const [feedbackState, setFeedbackState] = useState(''); 
+
+          const timerRef = useRef(null);
+
+          const shuffleArray = (arr) => [...arr].sort(() => Math.random() - 0.5);
+
+          const generateQuestion = useCallback((currentLevel) => {
+            const h = Math.floor(Math.random() * 12) + 1;
+            // Emphasize worksheet minutes
+            const allowedMinutes = [0, 5, 10, 15, 20, 25, 35, 40, 50, 55];
+            const m = allowedMinutes[Math.floor(Math.random() * allowedMinutes.length)];
+            
+            const day = DAYS[Math.floor(Math.random() * DAYS.length)];
+            const subject = SUBJECTS[Math.floor(Math.random() * SUBJECTS.length)];
+            
+            const formalTime = getFormalTime(h, m);
+            const informalTime = getInformalTime(h, m);
+            
+            let mode = '';
+            let validPhrases = [];
+            let context = '';
+            let targetPhraseForDisplay = '';
+            let receptiveOptions = null;
+            let isAnalogue = false;
+            let isDigital = false;
+
+            if (currentLevel === 1) {
+              isAnalogue = Math.random() > 0.5;
+              isDigital = !isAnalogue;
+              mode = isAnalogue ? 'ANALOGUE_MIX' : 'DIGITAL_MIX';
+              validPhrases = [formalTime, informalTime];
+              targetPhraseForDisplay = formalTime; 
+            } 
+            else if (currentLevel === 2) {
+              isAnalogue = Math.random() > 0.5;
+              isDigital = !isAnalogue;
+              mode = isAnalogue ? 'ANALOGUE_MIX' : 'DIGITAL_MIX';
+              validPhrases = [formalTime, informalTime];
+              targetPhraseForDisplay = informalTime;
+            } 
+            else if (currentLevel === 3) {
+              mode = 'RECEPTIVE_SENTENCE';
+              
+              const timePhraseFormal = (h === 12 && m === 0) ? 'mittags' : `um ${formalTime}`;
+              const timePhraseInformal = (h === 12 && m === 0) ? 'mittags' : `um ${informalTime}`;
+              
+              const useFormal = Math.random() > 0.5;
+              targetPhraseForDisplay = `${day} habe ich ${useFormal ? timePhraseFormal : timePhraseInformal} ${subject}`;
+              
+              const timeStr = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+              
+              let falseDays = shuffleArray(DAYS).filter(d => d !== day).slice(0, 2);
+              let falseSubjects = shuffleArray(SUBJECTS).filter(s => s !== subject).slice(0, 2);
+              
+              let falseTimes = [];
+              while(falseTimes.length < 2) {
+                let fh = Math.floor(Math.random() * 12) + 1;
+                let fm = allowedMinutes[Math.floor(Math.random() * allowedMinutes.length)];
+                let fStr = `${fh.toString().padStart(2, '0')}:${fm.toString().padStart(2, '0')}`;
+                if (fStr !== timeStr && !falseTimes.includes(fStr)) falseTimes.push(fStr);
+              }
+
+              receptiveOptions = {
+                days: shuffleArray([{text: DAYS_EN[day], val: day}, ...falseDays.map(d => ({text: DAYS_EN[d], val: d}))]),
+                times: shuffleArray([{text: timeStr, val: timeStr}, ...falseTimes.map(t => ({text: t, val: t}))]),
+                subjects: shuffleArray([{text: SUBJECTS_EN[subject], val: subject}, ...falseSubjects.map(s => ({text: SUBJECTS_EN[s], val: s}))]),
+                correctAnswers: { day, time: timeStr, subject }
+              };
+              setReceptiveSelection({ day: null, time: null, subject: null });
+            }
+            else {
+              // Level 4 & 5: Productive Sentences
+              isAnalogue = Math.random() > 0.5;
+              isDigital = !isAnalogue;
+              mode = 'SENTENCE_MIXED';
+              const timePhraseFormal = (h === 12 && m === 0) ? 'mittags' : `um ${formalTime}`;
+              const timePhraseInformal = (h === 12 && m === 0) ? 'mittags' : `um ${informalTime}`;
+              
+              validPhrases = [
+                `${day} habe ich ${timePhraseFormal} ${subject}`,
+                `${day} habe ich ${timePhraseInformal} ${subject}`
+              ];
+              
+              context = `Build: "${DAYS_EN[day]} I have ${SUBJECTS_EN[subject]} at ${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}"`;
+              if(h===12 && m===0) context = `Build: "${DAYS_EN[day]} I have ${SUBJECTS_EN[subject]} at midday"`;
+            }
+
+            let finalWordBank = [];
+            if (mode !== 'RECEPTIVE_SENTENCE') {
+              let maxWordCounts = {};
+              
+              validPhrases.forEach(phrase => {
+                  let counts = {};
+                  phrase.split(' ').forEach(w => { counts[w] = (counts[w] || 0) + 1; });
+                  for (let w in counts) {
+                      if (!maxWordCounts[w] || counts[w] > maxWordCounts[w]) {
+                          maxWordCounts[w] = counts[w];
+                      }
+                  }
+              });
+              
+              let baseWords = [];
+              for (let w in maxWordCounts) {
+                  for (let i = 0; i < maxWordCounts[w]; i++) { baseWords.push(w); }
+              }
+
+              const distractors = ['und', 'vor', 'nach', 'halb', 'Viertel', 'Uhr', 'zehn', 'zwanzig', 'fünf', 'um', 'habe', 'ich'];
+              distractors.push(SUBJECTS.find(s => s !== subject));
+              distractors.push(DAYS.find(d => d !== day));
+
+              const targetLength = Math.max(8, baseWords.length + 3);
+              let loopProtection = 0; 
+
+              while(baseWords.length < targetLength && loopProtection < 100) {
+                  const d = distractors[Math.floor(Math.random() * distractors.length)];
+                  if (!baseWords.includes(d) || d === 'fünf') {
+                    baseWords.push(d); 
+                  }
+                  loopProtection++;
+              }
+              
+              finalWordBank = shuffleArray(baseWords).map((word, id) => ({ id: `w_${id}`, word }));
+            }
+
+            setQuestion({
+              h, m, mode, validPhrases, wordBank: finalWordBank, context, targetPhraseForDisplay, receptiveOptions,
+              isAnalogue, isDigital
+            });
+            setSelectedWordIds([]);
+          }, []);
+
+          const startGame = () => {
+            initAudio(); 
+            setGameState('PLAY');
+            setLevel(1);
+            setXp(0);
+            setScore(0);
+            setStreak(0);
+            setTimeLeft(60);
+            generateQuestion(1);
+          };
+
+          const endGame = useCallback(() => {
+            setGameState('GAMEOVER');
+            clearInterval(timerRef.current);
+          }, []);
+
+          const triggerVictory = useCallback(() => {
+            sfx.victory();
+            setGameState('VICTORY');
+            clearInterval(timerRef.current);
+          }, []);
+
+          useEffect(() => {
+            if (gameState === 'PLAY') {
+              timerRef.current = setInterval(() => {
+                setTimeLeft((prev) => {
+                  if (prev <= 1) {
+                    endGame();
+                    return 0;
+                  }
+                  return prev - 1;
+                });
+              }, 1000);
+            }
+            return () => clearInterval(timerRef.current);
+          }, [gameState, endGame]);
+
+          const handleBankClick = (id) => {
+            if (feedbackState || selectedWordIds.includes(id)) return;
+            sfx.click();
+            
+            const newSelected = [...selectedWordIds, id];
+            setSelectedWordIds(newSelected);
+
+            const attemptStr = newSelected.map(selId => question.wordBank.find(w => w.id === selId).word).join(' ');
+            
+            if (question.validPhrases.includes(attemptStr)) {
+              checkProductiveAnswer(newSelected);
+            } else {
+              const maxWords = Math.max(...question.validPhrases.map(p => p.split(' ').length));
+              if (newSelected.length >= maxWords) {
+                checkProductiveAnswer(newSelected);
+              }
+            }
+          };
+
+          const handleAnswerClick = (id) => {
+            if (feedbackState) return;
+            sfx.click();
+            setSelectedWordIds(prev => prev.filter(selectedId => selectedId !== id));
+          };
+
+          const checkProductiveAnswer = (currentSelectionIds) => {
+            const attemptStr = currentSelectionIds.map(id => question.wordBank.find(w => w.id === id).word).join(' ');
+            const isCorrect = question.validPhrases.includes(attemptStr);
+            processAnswerResult(isCorrect);
+          };
+
+          const handleReceptiveClick = (category, value) => {
+            if (feedbackState) return;
+            sfx.click();
+            
+            const newSelection = { ...receptiveSelection, [category]: value };
+            setReceptiveSelection(newSelection);
+
+            if (newSelection.day && newSelection.time && newSelection.subject) {
+              const isCorrect = 
+                newSelection.day === question.receptiveOptions.correctAnswers.day &&
+                newSelection.time === question.receptiveOptions.correctAnswers.time &&
+                newSelection.subject === question.receptiveOptions.correctAnswers.subject;
+              
+              processAnswerResult(isCorrect);
+            }
+          };
+
+          const processAnswerResult = (isCorrect) => {
+            if (isCorrect) {
+              sfx.correct();
+              setFeedbackState('correct');
+              
+              // More generous time bonuses from Level 4
+              let timeBonus = 3;
+              if (level === 2) timeBonus = 4;
+              if (level === 3) timeBonus = 8;
+              if (level === 4) timeBonus = 15;
+              if (level === 5) timeBonus = 18;
+              
+              timeBonus += Math.floor(streak / 2); 
+              
+              // Increased max time to 120s so they can keep the huge bonuses
+              setTimeLeft(prev => Math.min(120, prev + timeBonus));
+              setStreak(prev => prev + 1);
+              
+              const points = 10 * (level) + (streak * 5);
+              setScore(prev => prev + points);
+              
+              const newXp = xp + 20;
+              setXp(newXp);
+              
+              let nextLevel = level;
+              if (newXp >= 60 && level === 1) nextLevel = 2;   // 3 correct
+              if (newXp >= 120 && level === 2) nextLevel = 3;  // 6 correct
+              if (newXp >= 180 && level === 3) nextLevel = 4;  // 9 correct
+              if (newXp >= 240 && level === 4) nextLevel = 5;  // 12 correct
+              if (newXp >= 300 && level === 5) {               // 15 correct -> WIN!
+                setTimeout(() => triggerVictory(), 800);
+                return;
+              }
+
+              if (nextLevel > level) {
+                sfx.levelUp();
+                setLevel(nextLevel);
+              }
+
+              setTimeout(() => {
+                setFeedbackState('');
+                generateQuestion(nextLevel);
+              }, 1000);
+
+            } else {
+              sfx.wrong();
+              setFeedbackState('wrong');
+              setStreak(0);
+              setTimeLeft(prev => Math.max(0, prev - 5));
+
+              setTimeout(() => {
+                setFeedbackState('');
+                if (question.mode === 'RECEPTIVE_SENTENCE') {
+                   setReceptiveSelection({ day: null, time: null, subject: null });
+                } else {
+                   setSelectedWordIds([]);
+                }
+              }, 1000);
+            }
+          };
+
+          // --- RENDERERS ---
+
+          if (gameState === 'MENU') {
+            return (
+              <div className="min-h-screen flex flex-col items-center justify-center p-4 font-sans text-gray-800">
+                <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-4 border-blue-400">
+                  <h1 className="text-4xl font-extrabold text-blue-600 mb-2 tracking-tight">School Day Sprint ⏰</h1>
+                  <p className="text-gray-600 mb-8 font-medium">Master telling the time in German!</p>
+                  
+                  <div className="space-y-4 text-left bg-blue-50 p-4 rounded-xl mb-8">
+                    <h3 className="font-bold text-blue-800">How to play:</h3>
+                    <ul className="text-sm text-blue-900 space-y-2 list-disc pl-4">
+                      <li>Both formal ("neun Uhr zwanzig") and informal ("zwanzig nach neun") answers are accepted!</li>
+                      <li>Words stay in place so you won't misclick!</li>
+                      <li>Beat the clock! Build streaks for big time bonuses.</li>
+                      <li>Complete all 5 Levels to win!</li>
+                    </ul>
                   </div>
-                ) : null}
-                
-                {question?.context && (
-                  <div className="text-center mt-4">
-                    <p className="text-indigo-600 font-bold text-lg bg-indigo-50 px-4 py-2 rounded-lg border border-indigo-200">
-                      {question.context}
+
+                  <button 
+                    onClick={startGame}
+                    className="w-full bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#1d4ed8] active:shadow-[0_0px_0_#1d4ed8] active:translate-y-[6px] transition-all text-xl animate-pulse"
+                  >
+                    Start Playing! ▶️
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          if (gameState === 'GAMEOVER') {
+            return (
+              <div className="min-h-screen bg-red-50 flex flex-col items-center justify-center p-4 font-sans absolute inset-0 z-50">
+                <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-4 border-red-400 animate-bounce-short">
+                  <h1 className="text-4xl font-extrabold text-red-500 mb-4">Time's Up!</h1>
+                  <div className="text-6xl mb-6">🔔</div>
+                  <div className="bg-gray-100 rounded-xl p-4 mb-8">
+                    <p className="text-gray-500 font-bold uppercase tracking-wider text-sm">Final Score</p>
+                    <p className="text-5xl font-black text-gray-800 my-2">{score}</p>
+                    <p className="text-blue-500 font-bold">Level Reached: {level}</p>
+                  </div>
+                  <button 
+                    onClick={startGame}
+                    className="w-full bg-green-500 hover:bg-green-600 active:bg-green-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#15803d] active:shadow-[0_0px_0_#15803d] active:translate-y-[6px] transition-all text-xl"
+                  >
+                    Play Again 🔄
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          if (gameState === 'VICTORY') {
+            return (
+              <div className="min-h-screen bg-yellow-300 flex flex-col items-center justify-center p-4 font-sans overflow-hidden absolute inset-0 z-50">
+                {/* Animated Background Confetti Elements */}
+                <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                  {[...Array(20)].map((_, i) => (
+                     <div key={i} className={`absolute animate-fall-confetti`} 
+                          style={{ 
+                            left: `${Math.random() * 100}%`, 
+                            top: `-10%`,
+                            backgroundColor: ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'][Math.floor(Math.random()*5)],
+                            width: `${Math.random() * 10 + 5}px`,
+                            height: `${Math.random() * 20 + 10}px`,
+                            animationDelay: `${Math.random() * 3}s`,
+                            animationDuration: `${Math.random() * 2 + 3}s`,
+                            transform: `rotate(${Math.random() * 360}deg)`
+                          }} 
+                      />
+                  ))}
+                </div>
+
+                <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-8 border-yellow-500 animate-pop-in z-10 relative">
+                  <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500 mb-6 drop-shadow-sm">
+                    Gut gemacht!
+                  </h1>
+                  
+                  <div className="text-8xl mb-6 animate-bounce">🏆</div>
+                  
+                  <div className="bg-yellow-50 rounded-2xl p-6 mb-8 border-2 border-yellow-200 shadow-inner">
+                    <p className="text-lg text-gray-800 font-bold mb-2">You completed all levels!</p>
+                    <p className="text-3xl font-black text-yellow-600 my-4">{score} pts</p>
+                    <p className="text-md text-red-600 font-extrabold uppercase tracking-wide bg-yellow-100 p-3 rounded-lg border border-yellow-300">
+                      Show this screen to Mr Croft-Cafferty for reward points!
                     </p>
                   </div>
+
+                  <button 
+                    onClick={startGame}
+                    className="w-full bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_#1d4ed8] active:shadow-[0_0px_0_#1d4ed8] active:translate-y-[6px] transition-all text-xl"
+                  >
+                    Play Again 🔄
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          // PLAY STATE
+          return (
+            <div className={`min-h-screen flex flex-col p-4 font-sans transition-colors duration-300 ${
+              feedbackState === 'wrong' ? 'bg-red-100' : feedbackState === 'correct' ? 'bg-green-100' : 'bg-indigo-50'
+            }`}>
+              
+              {/* Top HUD */}
+              <div className="max-w-2xl w-full mx-auto bg-white rounded-2xl shadow-md p-4 mb-4 flex justify-between items-center border-b-4 border-indigo-200">
+                <div className="flex flex-col">
+                  <span className="text-xs text-gray-500 font-bold uppercase">Level {level}/5</span>
+                  <span className="text-2xl font-black text-indigo-600">{score} pt</span>
+                </div>
+                
+                {streak > 1 && (
+                  <div className="flex items-center space-x-1 animate-pulse">
+                    <span className="text-orange-500 text-xl font-black">{streak}x</span>
+                    <span className="text-orange-500 text-sm font-bold">Combo! 🔥</span>
+                  </div>
                 )}
+
+                <div className="flex flex-col items-end">
+                  <span className="text-xs text-gray-500 font-bold uppercase">Time</span>
+                  <span className={`text-2xl font-black ${timeLeft <= 10 ? 'text-red-500 animate-pulse' : 'text-gray-800'}`}>
+                    {timeLeft}s
+                  </span>
+                </div>
               </div>
 
-              {/* Answer Box */}
-              <div className="min-h-[70px] w-full bg-gray-50 rounded-2xl border-2 border-dashed border-gray-300 p-3 flex flex-wrap gap-2 items-center justify-center">
-                {selectedWordIds.length === 0 && (
-                  <span className="text-gray-400 font-medium">Tap words below...</span>
+              {/* Timer Bar */}
+              <div className="max-w-2xl w-full mx-auto h-3 bg-gray-200 rounded-full mb-6 overflow-hidden">
+                <div 
+                  className={`h-full transition-all duration-1000 linear ${timeLeft > 20 ? 'bg-green-400' : timeLeft > 10 ? 'bg-yellow-400' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(100, (timeLeft / 60) * 100)}%` }}
+                />
+              </div>
+
+              {/* Main Game Area */}
+              <div className={`flex-grow max-w-2xl w-full mx-auto flex flex-col transition-transform ${feedbackState === 'wrong' ? 'animate-shake' : ''}`}>
+                
+                {/* RECEPTIVE LEVEL (Level 3) */}
+                {question?.mode === 'RECEPTIVE_SENTENCE' ? (
+                  <div className="flex-grow flex flex-col gap-4">
+                    <div className="bg-white rounded-3xl shadow-lg p-6 flex flex-col items-center justify-center border-4 border-indigo-100">
+                       <h2 className="text-indigo-400 font-bold text-sm uppercase tracking-wider mb-2">Read and Match</h2>
+                       <p className="text-2xl md:text-3xl font-bold text-gray-800 text-center">
+                         "{question.targetPhraseForDisplay}"
+                       </p>
+                    </div>
+                    
+                    <div className="bg-white rounded-3xl shadow-lg p-4 border-4 border-indigo-100 flex-grow flex flex-col justify-around gap-4">
+                       {/* Days Row */}
+                       <div className="flex flex-col">
+                         <span className="text-xs text-gray-400 font-bold uppercase mb-2">1. Select Day</span>
+                         <div className="flex gap-2">
+                           {question.receptiveOptions.days.map(opt => (
+                             <button key={opt.val} onClick={() => handleReceptiveClick('day', opt.val)}
+                               className={`flex-1 py-3 px-2 rounded-xl font-bold transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
+                                 ${receptiveSelection.day === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                               {opt.text}
+                             </button>
+                           ))}
+                         </div>
+                       </div>
+                       
+                       {/* Times Row */}
+                       <div className="flex flex-col">
+                         <span className="text-xs text-gray-400 font-bold uppercase mb-2">2. Select Time</span>
+                         <div className="flex gap-2">
+                           {question.receptiveOptions.times.map(opt => (
+                             <button key={opt.val} onClick={() => handleReceptiveClick('time', opt.val)}
+                               className={`flex-1 py-3 px-2 rounded-xl font-bold font-mono text-lg transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
+                                 ${receptiveSelection.time === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                               {opt.text}
+                             </button>
+                           ))}
+                         </div>
+                       </div>
+
+                       {/* Subjects Row */}
+                       <div className="flex flex-col">
+                         <span className="text-xs text-gray-400 font-bold uppercase mb-2">3. Select Subject</span>
+                         <div className="flex gap-2">
+                           {question.receptiveOptions.subjects.map(opt => (
+                             <button key={opt.val} onClick={() => handleReceptiveClick('subject', opt.val)}
+                               className={`flex-1 py-3 px-2 rounded-xl font-bold transition-all shadow-[0_4px_0_rgba(0,0,0,0.2)] active:shadow-none active:translate-y-[4px]
+                                 ${receptiveSelection.subject === opt.val ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                               {opt.text}
+                             </button>
+                           ))}
+                         </div>
+                       </div>
+                    </div>
+                  </div>
+                ) : 
+                
+                /* PRODUCTIVE LEVELS (L1, L2, L4, L5) */
+                (
+                  <>
+                    {/* Question Display */}
+                    <div className="bg-white rounded-3xl shadow-lg p-6 mb-4 flex-grow flex flex-col items-center justify-center border-4 border-indigo-100 min-h-[300px]">
+                      
+                      <h2 className="text-gray-400 font-bold text-sm uppercase tracking-wider mb-4 text-center">
+                        {level < 3 ? 'Build the time in German' : 'Build the German sentence'}
+                      </h2>
+
+                      <div className="mb-6 flex flex-col items-center justify-center">
+                        {question?.isAnalogue ? (
+                          <AnalogueClock h={question.h} m={question.m} />
+                        ) : question?.isDigital ? (
+                          <div className="bg-gray-800 text-green-400 font-mono text-7xl py-4 px-8 rounded-xl shadow-inner border-4 border-gray-900 tracking-widest">
+                            {question.h.toString().padStart(2, '0')}:{question.m.toString().padStart(2, '0')}
+                          </div>
+                        ) : null}
+                        
+                        {question?.context && (
+                          <div className="text-center mt-4">
+                            <p className="text-indigo-600 font-bold text-lg bg-indigo-50 px-4 py-2 rounded-lg border border-indigo-200">
+                              {question.context}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Answer Box */}
+                      <div className="min-h-[70px] w-full bg-gray-50 rounded-2xl border-2 border-dashed border-gray-300 p-3 flex flex-wrap gap-2 items-center justify-center">
+                        {selectedWordIds.length === 0 && (
+                          <span className="text-gray-400 font-medium">Tap words below...</span>
+                        )}
+                        {selectedWordIds.map((id) => {
+                          const w = question.wordBank.find(b => b.id === id);
+                          return (
+                            <button
+                              key={`ans_${id}`}
+                              onClick={() => handleAnswerClick(id)}
+                              className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-xl shadow-[0_4px_0_#312e81] active:shadow-none active:translate-y-[4px] transition-all animate-pop-in"
+                            >
+                              {w.word}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Stable Word Bank */}
+                    <div className="bg-white rounded-3xl shadow-lg p-6 border-4 border-indigo-100">
+                      <div className="flex flex-wrap justify-center gap-3">
+                        {question?.wordBank.map((w) => {
+                          const isSelected = selectedWordIds.includes(w.id);
+                          return (
+                            <button
+                              key={w.id}
+                              onClick={() => handleBankClick(w.id)}
+                              disabled={isSelected}
+                              className={`font-bold py-3 px-5 rounded-xl transition-all text-lg
+                                ${isSelected 
+                                  ? 'bg-gray-200 text-gray-400 shadow-none cursor-default opacity-50' 
+                                  : 'bg-yellow-400 hover:bg-yellow-500 text-yellow-900 shadow-[0_4px_0_#ca8a04] active:shadow-none active:translate-y-[4px] cursor-pointer'
+                                }`}
+                            >
+                              {w.word}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
                 )}
-                {selectedWordIds.map((id) => {
-                  const w = question.wordBank.find(b => b.id === id);
-                  return (
-                    <button
-                      key={`ans_${id}`}
-                      onClick={() => handleAnswerClick(id)}
-                      className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-xl shadow-[0_4px_0_#312e81] active:shadow-none active:translate-y-[4px] transition-all animate-pop-in"
-                    >
-                      {w.word}
-                    </button>
-                  );
-                })}
+
               </div>
+              
+              {/* CSS Animations */}
+              <style dangerouslySetInnerHTML={{__html: `
+                @keyframes shake {
+                  0%, 100% { transform: translateX(0); }
+                  25% { transform: translateX(-8px); }
+                  50% { transform: translateX(8px); }
+                  75% { transform: translateX(-8px); }
+                }
+                .animate-shake {
+                  animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both;
+                }
+                @keyframes bounce-short {
+                  0%, 100% { transform: translateY(0); }
+                  50% { transform: translateY(-15px); }
+                }
+                .animate-bounce-short {
+                  animation: bounce-short 0.5s ease-in-out;
+                }
+                @keyframes pop-in {
+                  0% { transform: scale(0.8); opacity: 0; }
+                  100% { transform: scale(1); opacity: 1; }
+                }
+                .animate-pop-in {
+                  animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+                }
+                @keyframes fall-confetti {
+                  0% { transform: translateY(-10vh) rotate(0deg); opacity: 1; }
+                  100% { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+                }
+                .animate-fall-confetti {
+                  animation-name: fall-confetti;
+                  animation-timing-function: linear;
+                  animation-iteration-count: infinite;
+                }
+              `}} />
             </div>
+          );
+        }
 
-            {/* Stable Word Bank */}
-            <div className="bg-white rounded-3xl shadow-lg p-6 border-4 border-indigo-100">
-              <div className="flex flex-wrap justify-center gap-3">
-                {question?.wordBank.map((w) => {
-                  const isSelected = selectedWordIds.includes(w.id);
-                  return (
-                    <button
-                      key={w.id}
-                      onClick={() => handleBankClick(w.id)}
-                      disabled={isSelected}
-                      className={`font-bold py-3 px-5 rounded-xl transition-all text-lg
-                        ${isSelected 
-                          ? 'bg-gray-200 text-gray-400 shadow-none cursor-default opacity-50' 
-                          : 'bg-yellow-400 hover:bg-yellow-500 text-yellow-900 shadow-[0_4px_0_#ca8a04] active:shadow-none active:translate-y-[4px] cursor-pointer'
-                        }`}
-                    >
-                      {w.word}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </>
-        )}
+        // --- RENDER INITIALIZATION ---
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
 
-      </div>
-
-      {/* Embedded CSS for animations */}
-      <style dangerouslySetInnerHTML={{__html: `
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-8px); }
-          50% { transform: translateX(8px); }
-          75% { transform: translateX(-8px); }
-        }
-        .animate-shake {
-          animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both;
-        }
-        @keyframes bounce-short {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-15px); }
-        }
-        .animate-bounce-short {
-          animation: bounce-short 0.5s ease-in-out;
-        }
-        @keyframes pop-in {
-          0% { transform: scale(0.8); opacity: 0; }
-          100% { transform: scale(1); opacity: 1; }
-        }
-        .animate-pop-in {
-          animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-        }
-      `}} />
-    </div>
-  );
-}
-
+    </script>
+</body>
+</html>
 
 ```
